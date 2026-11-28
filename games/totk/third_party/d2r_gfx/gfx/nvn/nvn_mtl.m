@@ -4291,7 +4291,16 @@ static void function_cache_set(int on);   // below, with function_cache_on
 /* The fixed size MetalFX upscales to (Tears of the Kingdom 1.4.3's "4K, MetalFX to 5K" preset, game_patches_v143.c, PR #2240):
    set as a flag by that runtime, read by output_upscale; packed w << 16 | h, 0 (the window) in every other game, which never sets it. */
 static _Atomic uint32_t g_mfx_target;
+/* Same-pass depth snapshot: skip the copy when the draw only tests stencil and writes nothing.
+   Atomic so "flag dsnap_skip_ro 0|1" can A/B it without a restart; defined here so the flag
+   parser and the draw path (far below) see the same object. */
+_Atomic int g_dsnap_skip_ro = 1;
 void dm_gfx_set_flag(const char *name, int v) {
+    if (!strcmp(name, "dsnap_skip_ro")) {
+        atomic_store(&g_dsnap_skip_ro, v != 0);
+        extern unsigned long long g_dsnap_ro_skips;
+        MLOG("[dsnap] skip read-only snapshots=%d (skipped so far %llu)", v != 0, g_dsnap_ro_skips); return;
+    }
     if (!strcmp(name, "mfx_target")) { atomic_store(&g_mfx_target, (uint32_t)v); return; }
     if (!strcmp(name,"heap_reuse")) { atomic_store(&g_rt_heap_on,v!=0); retire_idle_kick(); MLOG("[heap-reuse] enabled=%d",v!=0); return; }
     if (!strcmp(name,"record_compact")) { extern void nvn_record_compact_set(int) __attribute__((weak_import)); if(nvn_record_compact_set)nvn_record_compact_set(v); MLOG("[record-compact] enabled=%d",v!=0); return; }
@@ -9586,6 +9595,7 @@ static inline MTLTextureType treg_view_type(int tid, __unsafe_unretained id<MTLT
 static uint64_t g_dsnap_ser;                 // serial of the depth attachment the current draw reads through the copy (0 = none)
 static void *g_dsnap_tex; static uint64_t g_dsnap_rid;   // the copy bound for this draw
 static uint64_t g_dsnap_copies;
+unsigned long long g_dsnap_ro_skips;   // read-only stencil-test draws whose full-depth copy was avoided
 static inline __attribute__((always_inline)) int dsnap_hit(int tid) {   // caller holds g_rmu
     return g_dsnap_ser && tid > 0 && tid < g_ntreg && g_treg[tid].ok && g_treg[tid].t.serial == g_dsnap_ser;
 }
@@ -16305,6 +16315,20 @@ static int draw_att_reads(NvProg *pr, uint64_t out[ATT_READS_MAX]) {
     return n;
 }
 static int dsnap_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("TOTK_DEPTH_SNAP"); on = !(e && !strcmp(e, "0")); } return on; }
+/* The old test was (S.ds.dw || S.ds.st): stencil *test* enabled was treated as a depth/stencil write.
+   A draw whose six stencil ops are all KEEP (or whose write masks are both zero) writes neither
+   plane, so its own attachment is read-only and sampling it needs no snapshot -- the normal
+   att_unstored_read path stores the pass first. Check all six ops: fail/zfail/zpass for both faces. */
+static int dsnap_draw_writes(void) {
+    if (S.ds.dw) return 1;
+    if (!S.ds.st) return 0;
+    if (!atomic_load(&g_dsnap_skip_ro)) return 1;   /* diagnostic: original conservative behaviour */
+    if (!(S.st_wmask[0] | S.st_wmask[1])) return 0;
+    const int keep = NVN_STENCIL_OP_KEEP;
+    if (S.ds.fail_f == keep && S.ds.zfail_f == keep && S.ds.zpass_f == keep &&
+        S.ds.fail_b == keep && S.ds.zfail_b == keep && S.ds.zpass_b == keep) return 0;
+    return 1;
+}
 static void dsnap_clear(void) { if (g_dsnap_ser) { g_dsnap_ser = 0; args_dirty_all(); } }
 /* The draw about to be encoded writes depth / stencil and samples its pass's depth attachment d: end the pass, copy the
    attachment and let the draw's slots read the copy. Returns 0 when no copy can be made (the attachment is read directly). */
@@ -19957,8 +19981,14 @@ static void draw_inner(const p_draw *dw, const p_draw_idx *di) {
     // TOTK: the draw samples an attachment whose pixels are still only in tile memory: store them first (att_unstored_read).
     // Not in the second half of a fused pass: it reads the first half's pixels from tile memory by construction (fz_p2_draw).
     uint64_t att_rs[ATT_READS_MAX]; int att_n = att_store_on() ? draw_att_reads(pr, att_rs) : 0;
-    if (dsnap_on() && att_n && R.has_rt && R.rt.depth && (S.ds.dw || S.ds.st) && has_ser(att_rs, att_n, R.rt.depth->serial)) { if (!dsnap_prepare(R.rt.depth)) dsnap_clear(); }
-    else dsnap_clear();
+    int ds_reads_att = dsnap_on() && att_n && R.has_rt && R.rt.depth && has_ser(att_rs, att_n, R.rt.depth->serial);
+    if (ds_reads_att && dsnap_draw_writes()) { if (!dsnap_prepare(R.rt.depth)) dsnap_clear(); }
+    else {
+        if (ds_reads_att && atomic_load(&g_dsnap_skip_ro) && S.ds.st && !S.ds.dw &&
+            ++g_dsnap_ro_skips % 1000 == 0)
+            MLOG("[dsnap] avoided %llu full-depth copies for stencil-test-only draws", g_dsnap_ro_skips);
+        dsnap_clear();
+    }
 #if !defined(GAME_BOTW) && !defined(GAME_NS2)   /* TOTK: the colour snapshot (csnap) */
     csnap_draw(pr, att_rs, &att_n);   // a read of its own colour target off the fragment's pixel reads a copy
     int cs_tid = g_csnap_tid; uint64_t cs_ser = g_csnap_ser;   // the copy this draw reads (0: none)
