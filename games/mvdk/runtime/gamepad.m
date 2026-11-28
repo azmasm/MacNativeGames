@@ -30,6 +30,10 @@ static int toggleOn[CONTROLLER_BUTTONS];        /* for toggle */
 static int toggleMoved[CONTROLLER_BUTTONS];     /* the stick moved since the toggle went on */
 static __weak GCController *rawLeftController;
 static SwitchLeftFallback rawLeft;
+/* The HID stick fallback's reach (gamepad_layout.h gamepad_hid_reach), X and Y: a Switch Pro Controller's sticks
+   stop at about 0.68-0.83 of the 12-bit range, so without it the fallback gave 64-79 % of a full push (#2417, as
+   shared/runtime/gamepad_core.h). Reset with the fallback. */
+static GamepadHidReach rawLeftReach[2];
 static uint64_t gamepadRawLeftAt;
 static int32_t gamepadNativeLx, gamepadNativeLy;
 static void refresh_gamepads(void);
@@ -37,7 +41,7 @@ static void refresh_gamepads(void);
 /* Called on the main run loop by the already-open Switch HID motion stream. */
 void runtime_gamepad_switch_left(void *source, int x, int y) {
     GCController *controller = (__bridge GCController *)source;
-    if (rawLeftController != controller) rawLeft = (SwitchLeftFallback){0};
+    if (rawLeftController != controller) { rawLeft = (SwitchLeftFallback){0}; memset(rawLeftReach, 0, sizeof rawLeftReach); }
     rawLeftController = controller;
     switch_left_feed(&rawLeft, x, y, runtime_now_ns());
     refresh_gamepads();
@@ -461,7 +465,7 @@ static void refresh_gamepads(void) {
         int wasActive = rawLeft.active;
         float rawX, rawY;
         if (controller == rawLeftController && switch_left_get(&rawLeft, lx, ly, runtime_now_ns(), &rawX, &rawY)) {
-            lx = rawX; ly = rawY;
+            lx = gamepad_hid_reach(&rawLeftReach[0], rawX); ly = gamepad_hid_reach(&rawLeftReach[1], rawY);   /* the stick's reach (#2417) */
             rawAt = rawLeft.at;
             if (!wasActive) fprintf(stderr, "[totk-input] Switch left stick: native axes stuck at zero; using live HID input\n");
         }

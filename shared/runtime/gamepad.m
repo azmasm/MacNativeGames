@@ -76,7 +76,7 @@ static void refresh_gamepads(void) {
         int wasActive = rawLeft.active;
         float rawX, rawY;
         if (controller == rawLeftController && switch_left_get(&rawLeft, lx, ly, runtime_now_ns(), &rawX, &rawY)) {
-            lx = rawX; ly = rawY;
+            lx = gamepad_hid_reach(&rawLeftReach[0], rawX); ly = gamepad_hid_reach(&rawLeftReach[1], rawY);   /* the stick's reach (#2417) */
             rawAt = rawLeft.at;
             if (!wasActive) fprintf(stderr, "[totk-input] Switch left stick: native axes stuck at zero; using live HID input\n");
         }
@@ -87,7 +87,7 @@ static void refresh_gamepads(void) {
         int rightWasActive = rawRight.active;
         float rawRX, rawRY;
         if (controller == rawRightController && switch_left_get(&rawRight, rx, ry, runtime_now_ns(), &rawRX, &rawRY)) {
-            rx = rawRX; ry = rawRY;
+            rx = gamepad_hid_reach(&rawRightReach[0], rawRX); ry = gamepad_hid_reach(&rawRightReach[1], rawRY);
             rawRightAt = rawRight.at;
             if (!rightWasActive) fprintf(stderr, "[totk-input] Switch right stick: native axes stuck at zero; using live HID input\n");
         }

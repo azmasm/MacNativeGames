@@ -73,6 +73,10 @@ static uint16_t controllerMap[CONTROLLER_BUTTONS];
 static uint8_t controllerModes[CONTROLLER_BUTTONS];
 static __weak GCController *rawLeftController, *rawRightController;
 static SwitchLeftFallback rawLeft, rawRight;
+/* The HID stick fallback's reach (gamepad_layout.h gamepad_hid_reach), X and Y of each stick, as the HID path scales a Switch
+   Pro Controller's: its sticks stop at about 0.68-0.83 of the 12-bit range, so without it the fallback gave 64-79 % of a
+   full push and Link walked where he should run (#2417). Reset with the fallback. */
+static GamepadHidReach rawLeftReach[2], rawRightReach[2];
 static void (*captureHook)(void);
 static int captureDown, captureSeen;   /* the capture button as the reports say, and as refresh_gamepads last saw it */
 /* The screenshot button (controller_map.h CONTROLLER_SCREENSHOT_*, user 2026-11-11): the physical button whose 3-second hold
@@ -103,22 +107,22 @@ static _Atomic int gamepadBackground, gamepadFocused = 1;
 /* Called on the main run loop by the already-open Switch HID motion stream. */
 void runtime_gamepad_switch_left(void *source, int x, int y) {
     GCController *controller = (__bridge GCController *)source;
-    if (rawLeftController != controller) rawLeft = (SwitchLeftFallback){0};
+    if (rawLeftController != controller) { rawLeft = (SwitchLeftFallback){0}; memset(rawLeftReach, 0, sizeof rawLeftReach); }
     rawLeftController = controller;
     switch_left_feed(&rawLeft, x, y, runtime_now_ns());
     refresh_gamepads();
 }
 void runtime_gamepad_switch_right(void *source, int x, int y) {
     GCController *controller = (__bridge GCController *)source;
-    if (rawRightController != controller) rawRight = (SwitchLeftFallback){0};
+    if (rawRightController != controller) { rawRight = (SwitchLeftFallback){0}; memset(rawRightReach, 0, sizeof rawRightReach); }
     rawRightController = controller;
     switch_left_feed(&rawRight, x, y, runtime_now_ns());
     refresh_gamepads();
 }
 /* A controller that goes away takes its HID stick fallback with it (games/odyssey). */
 static void gamepad_forget_raw(GCController *controller) {
-    if (rawLeftController == controller) { rawLeftController = nil; rawLeft = (SwitchLeftFallback){0}; }
-    if (rawRightController == controller) { rawRightController = nil; rawRight = (SwitchLeftFallback){0}; }
+    if (rawLeftController == controller) { rawLeftController = nil; rawLeft = (SwitchLeftFallback){0}; memset(rawLeftReach, 0, sizeof rawLeftReach); }
+    if (rawRightController == controller) { rawRightController = nil; rawRight = (SwitchLeftFallback){0}; memset(rawRightReach, 0, sizeof rawRightReach); }
 }
 
 static int32_t stick_axis(float value) {
