@@ -22570,7 +22570,7 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp]; es_reset();
     [en setViewport:vp];
-    [en setRenderPipelineState:g_blit_hdr_pso && (src.pixelFormat==MTLPixelFormatRGBA16Float || dst.pixelFormat==MTLPixelFormatRGBA16Float) ? g_blit_hdr_pso : g_blit_pso];   // an FP16 picture or drawable: the HDR copy
+    [en setRenderPipelineState:g_blit_hdr_pso && src.pixelFormat==MTLPixelFormatRGBA16Float ? g_blit_hdr_pso : g_blit_pso];   // an FP16 picture: the HDR copy; an SDR one into an FP16 drawable is decoded by fs (#2419: fshdr takes linear input and washed it out)
     [en setFragmentTexture:present_raw_src(src) atIndex:0];
     [en setFragmentSamplerState:g_blit_samp atIndex:0];
     float uv[12] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
@@ -22638,7 +22638,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
 #endif
     [args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
     [en setArgumentTable:args atStages:MTLRenderStageFragment];
-    [en setViewport:vp]; [en setRenderPipelineState:g_blit_hdr_pso && (pic.pixelFormat==MTLPixelFormatRGBA16Float || dst.pixelFormat==MTLPixelFormatRGBA16Float) ? g_blit_hdr_pso : g_blit_pso];   // as present_encode
+    [en setViewport:vp]; [en setRenderPipelineState:g_blit_hdr_pso && pic.pixelFormat==MTLPixelFormatRGBA16Float ? g_blit_hdr_pso : g_blit_pso];   // as present_encode
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     MTLViewport ovp; float fuv[8];
     [en setRenderPipelineState:g_blit_pso];
@@ -23064,8 +23064,13 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (!layer) return 0;
 #if TARGET_OS_OSX
     if(totk_hdr_available() && front_hdr_present_mode){
-        MTLPixelFormat want=hdrFrame?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
-        if(layer.pixelFormat!=want){mtl_finish_gpu();front_hdr_present_mode(hdrFrame);}
+        /* The layer follows the HDR setting, not each frame: a frame with no HDR picture (the game paused behind the ability
+           wheel or a quick selector does not compose one) is drawn into the HDR layer as SDR (present_encode's fs decodes it).
+           Switching the layer to SDR and back for those frames made macOS composite the window again each time: the screen
+           flashed while L or the D-pad was held (#2419). */
+        const BOOL hdrLayer=totk_hdr_active() && !atomic_load(&g_hdr_shader_failed);
+        MTLPixelFormat want=hdrLayer?MTLPixelFormatRGBA16Float:MTLPixelFormatBGRA8Unorm;
+        if(layer.pixelFormat!=want){mtl_finish_gpu();front_hdr_present_mode(hdrLayer);}
         /* the peak the HDR copy clamps to (present_encode's uv[8]): the frontend tags the canvas with no less (macOS 26) */
         if(hdrFrame && front_hdr_present_headroom)front_hdr_present_headroom(fminf(front_hdr_headroom?front_hdr_headroom():1,t_hdr_present_peak));
         /* The display link may hand a drawable of the format before the switch. It is drawn into as it is (present_pipeline
